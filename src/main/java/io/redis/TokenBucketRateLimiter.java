@@ -3,49 +3,49 @@ package io.redis;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Transaction;
 
-import java.util.List;
-
 public class TokenBucketRateLimiter {
-
     private final Jedis jedis;
-    private final int limit;
-    private final double refillRate;
+    private final int bucketCapacity; // Maximum tokens the bucket can hold
+    private final double refillRate; // Tokens refilled per second
 
-    public TokenBucketRateLimiter(Jedis jedis, int limit, double refillRate) {
+    public TokenBucketRateLimiter(Jedis jedis, int bucketCapacity, double refillRate) {
         this.jedis = jedis;
-        this.limit = limit;
+        this.bucketCapacity = bucketCapacity;
         this.refillRate = refillRate;
     }
 
     public boolean isAllowed(String clientId) {
-        long currentTime = System.currentTimeMillis();
         String keyCount = "rate_limit:" + clientId + ":count";
         String keyLastRefill = "rate_limit:" + clientId + ":lastRefill";
-        int bucketCapacity = limit;
 
-        // Retrieve the last refill time and current token count in a transaction
+        long currentTime = System.currentTimeMillis();
+
+        // Fetch current state
         Transaction transaction = jedis.multi();
         transaction.get(keyLastRefill);
         transaction.get(keyCount);
-        List<Object> result = transaction.exec();
+        var results = transaction.exec();
 
-        long lastRefillTime = result.get(0) != null ? Long.parseLong((String) result.get(0)) : currentTime;
-        int tokenCount = result.get(1) != null ? Integer.parseInt((String) result.get(1)) : bucketCapacity;
+        long lastRefillTime = results.get(0) != null ? Long.parseLong((String) results.get(0)) : currentTime;
+        int tokenCount = results.get(1) != null ? Integer.parseInt((String) results.get(1)) : bucketCapacity;
 
-        // Calculate time since last refill and tokens to add
-        long timeElapsedMs = currentTime - lastRefillTime;
-        double timeElapsedSecs = timeElapsedMs / 1000.0;
-        int tokensToAdd = (int) (timeElapsedSecs * refillRate);
-        int newTokenCount = Math.min(bucketCapacity, tokenCount + tokensToAdd); // Making sure we don't exceed bucket's capacity
-        boolean isAllowed = newTokenCount > 0;
+        // Refill tokens
+        long elapsedTimeMs = currentTime - lastRefillTime;
+        double elapsedTimeSecs = elapsedTimeMs / 1000.0;
+        int tokensToAdd = (int) (elapsedTimeSecs * refillRate);
+        tokenCount = Math.min(bucketCapacity, tokenCount + tokensToAdd);
 
-        // Update token count and last refill time if tokens were refilled
-        transaction = jedis.multi();
-        transaction.set(keyCount, String.valueOf(newTokenCount));
-        transaction.set(keyLastRefill, String.valueOf(currentTime));
+        // Check if the request is allowed
+        boolean isAllowed = tokenCount > 0;
+
         if (isAllowed) {
-            transaction.decr(keyCount);
+            tokenCount--; // Consume one token
         }
+
+        // Update Redis state
+        transaction = jedis.multi();
+        transaction.set(keyLastRefill, String.valueOf(currentTime));
+        transaction.set(keyCount, String.valueOf(tokenCount));
         transaction.exec();
 
         return isAllowed;
