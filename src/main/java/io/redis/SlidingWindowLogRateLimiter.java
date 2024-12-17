@@ -4,7 +4,6 @@ import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Transaction;
 
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 public class SlidingWindowLogRateLimiter {
@@ -58,22 +57,8 @@ public class SlidingWindowLogRateLimiter {
         if (isAllowed) {
             Transaction transaction = jedis.multi();
             transaction.hset(key, fieldKey, "");
-            transaction.expire(key, (int) windowSize);
+            transaction.hexpire(key, windowSize, fieldKey);
             transaction.exec();
-        }
-
-        return isAllowed;
-    }
-
-    public boolean isAllowedStringAlternative(String clientId) {
-        String requestKeyPattern = "rate_limit:" + clientId + ":*";
-        Set<String> keys = jedis.keys(requestKeyPattern); // Avoid using KEYS in production
-        int requestCount = keys.size();
-        boolean isAllowed = requestCount < limit;
-
-        if (isAllowed) {
-            String uniqueKey = "rate_limit:" + clientId + ":" + UUID.randomUUID();
-            jedis.setex(uniqueKey, (int) windowSize, "");
         }
 
         return isAllowed;
