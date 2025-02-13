@@ -2,10 +2,10 @@ package io.redis;
 
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Transaction;
-
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+
+import static redis.clients.jedis.args.ExpiryOption.NX;
 
 public class SlidingWindowCounterRateLimiter {
 
@@ -22,41 +22,31 @@ public class SlidingWindowCounterRateLimiter {
     }
 
     public boolean isAllowed(String clientId) {
-        long currentTime = System.currentTimeMillis();
-        long subWindowSizeMillis = subWindowSize * 1000;
-        long numSubWindows = (windowSize * 1000) / subWindowSizeMillis;
-
         String key = "rate_limit:" + clientId;
+        Map<String, String> subWindowCounts = jedis.hgetAll(key);
+        long totalCount = subWindowCounts.values().stream()
+                .mapToLong(Long::parseLong)
+                .sum();
 
-        // Calculate the current sub-window index based on the time
-        long currentSubWindow = currentTime / subWindowSizeMillis;
+        boolean isAllowed = totalCount < limit;
 
-        // Start a transaction to increment the current sub-window count and set TTL
-        Transaction transaction = jedis.multi();
-        transaction.hincrBy(key, Long.toString(currentSubWindow), 1);
-        String[] fields = new String[1000];
-        Arrays.fill(fields, Long.toString(currentSubWindow)); // Fill the array with the currentSubWindow value
-        transaction.hexpire(key, windowSize, fields);
+        if (isAllowed) {
+            // Calculate the current sub-window index based on the time
+            long currentTime = System.currentTimeMillis();
+            long subWindowSizeMillis = subWindowSize * 1000;
+            long currentSubWindow = currentTime / subWindowSizeMillis;
 
-        // Calculate the total counts for all sub-windows within the sliding window
-        List<Long> subWindowsToCheck = new ArrayList<>();
-        for (long subWindow = currentSubWindow; subWindow >= (currentSubWindow - numSubWindows + 1); subWindow--) {
-            subWindowsToCheck.add(subWindow);
+            // Start a transaction to increment the current sub-window count and set TTL
+            Transaction transaction = jedis.multi();
+            transaction.hincrBy(key, Long.toString(currentSubWindow), 1);
+            transaction.hexpire(key, windowSize, NX, String.valueOf(currentSubWindow));
+            List<Object> result = transaction.exec();
+
+            if (result == null || result.isEmpty()) {
+                throw new IllegalStateException("Empty result from Redis transaction");
+            }
         }
-        subWindowsToCheck.forEach(subWindow -> transaction.hget(key, Long.toString(subWindow)));
 
-        List<Object> result = transaction.exec();
-
-        if (result == null || result.isEmpty()) {
-            throw new IllegalStateException("Empty result from Redis transaction");
-        }
-
-        long totalCount = result.stream()
-                .skip(2)
-                .map(it -> it == null ? 0 : Long.parseLong((String) it))
-                .reduce(0L, Long::sum);
-
-        // Check if the total count is within the limit
-        return totalCount <= limit;
+        return isAllowed;
     }
 }
